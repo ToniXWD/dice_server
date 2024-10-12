@@ -13,3 +13,6 @@ doc = false
 hyper = { version = "0.14", features = ["full"] }
 tokio = { version = "1.29", features = ["full"] }
 rand = { version = "0.8" }
+opentelemetry = "0.22.0"
+opentelemetry_sdk = "0.22.1"
+opentelemetry-stdout = { version = "0.3.0", features = ["trace"] }
