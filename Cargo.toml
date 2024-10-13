@@ -11,8 +11,9 @@ doc = false
 
 [dependencies]
 hyper = { version = "0.14", features = ["full"] }
-tokio = { version = "1.29", features = ["full"] }
+tokio = { version = "1.40", features = ["full"] }
 rand = { version = "0.8" }
-opentelemetry = "0.22.0"
-opentelemetry_sdk = "0.22.1"
-opentelemetry-stdout = { version = "0.3.0", features = ["trace"] }
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.26", features = ["tonic"] }
+opentelemetry-semantic-conventions = { version = "0.26" }
