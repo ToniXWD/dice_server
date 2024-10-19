@@ -1,8 +1,13 @@
+use lazy_static::lazy_static;
+use opentelemetry::metrics::Counter;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use actix_web::{get, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use awc::http::header::{HeaderMap, HeaderName, HeaderValue};
+use opentelemetry::metrics::MetricsError;
 use opentelemetry::trace::{SpanKind, TraceContextExt, TraceError, Tracer};
 use opentelemetry::Context;
 use opentelemetry::{global, KeyValue};
@@ -13,6 +18,29 @@ use opentelemetry_sdk::trace as sdktrace;
 use opentelemetry_sdk::{runtime, Resource};
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use rand::Rng;
+
+// 定义一个结构体来保存我们的计数器
+struct HttpMetrics {
+    success_counter: Counter<u64>,
+    failure_counter: Counter<u64>,
+}
+
+// 使用 lazy_static 创建一个全局的 HttpMetrics 实例
+lazy_static! {
+    static ref HTTP_METRICS: Arc<HttpMetrics> = Arc::new({
+        let meter = global::meter("http_metrics");
+        HttpMetrics {
+            success_counter: meter
+                .u64_counter("http_requests_success")
+                .with_description("成功的 HTTP 请求总数")
+                .init(),
+            failure_counter: meter
+                .u64_counter("http_requests_failure")
+                .with_description("失败的 HTTP 请求总数")
+                .init(),
+        }
+    });
+}
 
 fn inject_context(request: &mut HeaderMap, cx: &Context) {
     // 使用 OpenTelemetry 的 HTTP 传播器 (propagator) 注入追踪上下文到 HTTP 请求头
@@ -74,22 +102,33 @@ fn get_cx_from_parent_cx<'a>(
 async fn randnum() -> impl Responder {
     let cx = get_cx_from_parent_cx("dice_server".to_string(), "randnum".to_string(), None);
 
-    println!("randnum: Current context: {:?}", cx);
-    println!("randnum: Current span: {:?}", cx.span());
+    println!("randnum: 当前上下文: {:?}", cx);
+    println!("randnum: 当前 span: {:?}", cx.span());
 
     let mut request = awc::Client::default().get("http://127.0.0.1:8080/gen_num");
 
-    // 将注入数据 r_headers 添加到 headers 中
     let req_headers = request.headers_mut();
     inject_context(req_headers, &cx);
 
-    let mut response = request.send().await.unwrap();
-    let body = response.body().await.unwrap();
-
-    cx.span()
-        .add_event("Received response from gen_num", vec![]);
-
-    HttpResponse::Ok().body(body)
+    match request.send().await {
+        Ok(mut response) => match response.body().await {
+            Ok(body) => {
+                HTTP_METRICS.success_counter.add(1, &[]);
+                cx.span().add_event("从 gen_num 收到响应", vec![]);
+                HttpResponse::Ok().body(body)
+            }
+            Err(_) => {
+                HTTP_METRICS.failure_counter.add(1, &[]);
+                cx.span().add_event("读取响应体失败", vec![]);
+                HttpResponse::InternalServerError().body("读取响应体失败")
+            }
+        },
+        Err(_) => {
+            HTTP_METRICS.failure_counter.add(1, &[]);
+            cx.span().add_event("发送请求失败", vec![]);
+            HttpResponse::InternalServerError().body("发送请求失败")
+        }
+    }
 }
 
 #[get("/gen_num")]
@@ -123,7 +162,7 @@ async fn gen_num(req: HttpRequest) -> impl Responder {
         )],
     );
 
-    // 返回响应
+    HTTP_METRICS.success_counter.add(1, &[]);
     HttpResponse::Ok().body(random_number.to_string())
 }
 
@@ -137,6 +176,18 @@ fn is_odd(cx: &Context) -> bool {
         vec![opentelemetry::KeyValue::new("is odd?", res.to_string())],
     );
     res
+}
+
+fn init_meter_provider() -> Result<opentelemetry_sdk::metrics::SdkMeterProvider, MetricsError> {
+    opentelemetry_otlp::new_pipeline()
+        .metrics(runtime::Tokio)
+        .with_period(Duration::from_secs(5))
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic() // 使用 Tonic 作为 gRPC 客户端
+                .with_endpoint("http://localhost:4317"), // TODO: 给出一个metric收集器的方案
+        )
+        .build()
 }
 
 // 初始化追踪提供者 (Tracer Provider)，该函数返回一个全局的 `TracerProvider`
@@ -164,6 +215,9 @@ fn init_tracer_provider() -> Result<opentelemetry_sdk::trace::TracerProvider, Tr
 fn init_tracer() {
     let tracer_provider = init_tracer_provider().expect("Failed to initialize tracer provider.");
     global::set_tracer_provider(tracer_provider);
+    let meter_provider = init_meter_provider().expect("Failed to initialize meter provider.");
+    global::set_meter_provider(meter_provider);
+
     global::set_text_map_propagator(TraceContextPropagator::new());
 }
 
